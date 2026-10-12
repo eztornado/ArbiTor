@@ -1,4 +1,4 @@
-# Token Arbitrage Scanner
+# ArbiTor
 
 Escáner de oportunidades de arbitraje de precio entre agregadores y DEX en **Base** y **Solana**, escrito en Python. Consulta cotizaciones en paralelo, compara comprar en una fuente y vender en otra, descuenta una reserva de costes configurable y guarda el historial en SQLite.
 
