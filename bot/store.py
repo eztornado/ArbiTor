@@ -58,13 +58,13 @@ class Store:
     def live_pnl_today(self) -> int:
         row = self.db.execute(
             "SELECT COALESCE(SUM(pnl),0) FROM cycles "
-            "WHERE mode='live' AND status IN ('live_executed','holding_after_buy') AND date(created_at)=date('now')"
+            "WHERE mode='live' AND status IN ('live_executed','holding_after_buy','reconciliation_required','execution_state_unknown') AND date(created_at)=date('now')"
         ).fetchone()
         return int(row[0])
 
     def live_trades_last_hour(self) -> int:
         row = self.db.execute(
-            "SELECT COUNT(*) FROM cycles WHERE mode='live' AND status IN ('live_executed','holding_after_buy') "
+            "SELECT COUNT(*) FROM cycles WHERE mode='live' AND status IN ('live_executed','holding_after_buy','reconciliation_required','execution_state_unknown') "
             "AND created_at >= datetime('now','-1 hour')"
         ).fetchone()
         return int(row[0])
@@ -72,6 +72,7 @@ class Store:
     def recent_quote_pnls(self, chain: str, quote_token: str, target_token: str, limit: int) -> list[int]:
         rows = self.db.execute(
             "SELECT quote_pnl FROM cycles WHERE chain=? AND quote_token=? AND target_token=? "
+            "AND status != 'no_cross_venue_route' "
             "ORDER BY id DESC LIMIT ?",
             (chain, quote_token, target_token, limit),
         ).fetchall()
