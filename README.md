@@ -18,6 +18,16 @@ El proyecto incluye ejecución live experimental. Antes de comprar, exige umbral
 - **Solana:** cotización directa mediante Raydium Trade API; Orca, Meteora, Pump.fun y LaunchLab se cotizan a través de Jupiter con filtros DEX para restringir cada ruta al protocolo correspondiente. `Stonk.fun` se mapea a la etiqueta `Raydium Launchlab`; no es una fuente de liquidez aparte de LaunchLab.
 - **Laya (opcional):** servicio externo que puede actuar como veto de riesgo. No genera ni autoriza operaciones por sí solo. Véase [Laya](https://github.com/NandhaKishorM/laya).
 
+### Descubrimiento y configuración guiada
+
+Ejecuta `python -m bot --wizard` para abrir el asistente en terminal, o pasa el token directamente con `python -m bot --wizard VELVET`. El flujo busca por nombre, símbolo o address/mint, clasifica los candidatos por liquidez (35%), volumen 24h (25%), transacciones (15%), diversidad de DEX (10%), presencia del mismo CoinGecko ID en varias redes (10%) y coincidencia entre fuentes (5%). El score es una heurística explicable de calidad de mercado, **no una probabilidad de beneficio ni una predicción de arbitraje rentable**.
+
+El asistente permite seleccionar una representación por red, propone tokens quote según los pools indexados, verifica por RPC que la red y los decimales de quote/target coincidan entre redes, y enseña el resumen de direcciones, liquidez, DEX y host RPC para revisión. Si CoinGecko no permite corroborar la identidad entre redes, solicita confirmación manual explícita. En el resumen final, escribir `EMPEZAR A ARBITRAR` guarda la configuración en `.env` y establece `LIVE_TRADING=true`, porque esa confirmación expresa que quieres operar en real. Después inicia el proceso con `python -m bot --live`; el asistente configura el entorno pero no deja un demonio ejecutándose en segundo plano. La escritura es atómica y preserva el resto de opciones.
+
+DexScreener se consulta siempre; CoinGecko Onchain se añade si configuras `COINGECKO_PRO_API_KEY` (API Pro). La búsqueda de CoinGecko pagina hasta `COINGECKO_DISCOVERY_PAGES` páginas (1–10, por defecto 3). ([DEX Screener API](https://docs.dexscreener.com/api/reference), [CoinGecko Onchain search](https://docs.coingecko.com/reference/search-pools))
+
+La opción `--discover` sigue disponible para consultar resultados sin entrar al asistente; `--discover VELVET --json-output` produce JSON. Los indexadores pueden devolver homónimos y pares manipulados: revisa contratos/mints, enlaces y liquidez antes de guardar. El descubrimiento no se usa como cotización de ejecución ni envía operaciones.
+
 Consulta la documentación de [0x Swap API](https://docs.0x.org/), [Odos API](https://docs.odos.xyz/build/api-docs), [Aerodrome Router](https://github.com/aerodrome-finance/contracts/blob/main/contracts/interfaces/IRouter.sol), [Raydium Trade API](https://github.com/raydium-io/raydium-docs-v1/blob/main/sdk-api/trade-api.mdx), [Jupiter DEX filters](https://github.com/jup-ag/jupiter-quote-api-node/blob/main/swagger.yaml), [Orca Whirlpools](https://github.com/orca-so/whirlpools) y [Meteora DLMM](https://github.com/MeteoraAg/docs/tree/main/developer-guides/dlmm) para conocer los requisitos vigentes.
 
 ## Requisitos
@@ -162,6 +172,8 @@ Valores relevantes de `.env`:
 | `LAYA_BASE_URL` | URL base de Laya; por defecto apunta al servicio local de ejemplo. |
 | `LAYA_API_KEY` | Clave opcional si el servidor Laya está protegido. |
 | `LAYA_BLOCK_PROBABILITY` | Umbral de riesgo comunicado por Laya a partir del cual se veta la operación. |
+| `COINGECKO_PRO_API_KEY` | Clave opcional de CoinGecko Onchain API Pro para ampliar el descubrimiento global de pools. |
+| `COINGECKO_DISCOVERY_PAGES` | Páginas de resultados CoinGecko que consulta `--discover` (1–10; aumenta cobertura y consumo de API). |
 
 `SLIPPAGE_BPS` se envía a Odos para limitar el deslizamiento de la cotización. `ESTIMATED_COST_QUOTE` es una reserva adicional configurable en unidades mínimas del token quote. Debes calibrarla; el escáner no calcula por completo gas, costes de red ni coste de inventario.
 

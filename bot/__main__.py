@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import signal
 import time
@@ -10,6 +11,8 @@ from .metrics import calculate
 from .quotes import QuoteClient
 from .store import Store
 from .live import LiveExecutor, MultiChainLiveExecutor
+from .discovery import TokenDiscovery
+from .wizard import run_wizard
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -28,9 +31,46 @@ def main():
     parser.add_argument("--once", action="store_true", help="ejecuta un ciclo y termina")
     parser.add_argument("--live", action="store_true", help="ejecuta swaps reales (requiere LIVE_TRADING=true)")
     parser.add_argument("--metrics", action="store_true", help="muestra estadísticas históricas del par y termina")
+    parser.add_argument("--discover", metavar="TOKEN", help="busca pools y representaciones del token por nombre, símbolo o address/mint")
+    parser.add_argument("--wizard", nargs="?", const="", metavar="TOKEN",
+                        help="asistente interactivo para buscar, revisar y configurar un token")
+    parser.add_argument("--json-output", action="store_true", help="emite JSON (con --discover)")
     args = parser.parse_args()
     if args.metrics and args.live:
         parser.error("--metrics y --live son operaciones incompatibles")
+    if args.discover and (args.live or args.metrics):
+        parser.error("--discover es una consulta independiente y no se combina con --live o --metrics")
+    if args.wizard is not None and (args.discover or args.live or args.metrics or args.once):
+        parser.error("--wizard es interactivo y se ejecuta por separado")
+    if args.json_output and not args.discover:
+        parser.error("--json-output requiere --discover")
+    if args.discover:
+        candidates, errors = TokenDiscovery().discover(args.discover)
+        if args.json_output:
+            print(json.dumps({"query": args.discover, "candidates": [c.as_dict() for c in candidates],
+                              "errors": errors}, ensure_ascii=False, indent=2))
+        else:
+            print(f"Descubrimiento de {args.discover}: {len(candidates)} pools candidatos")
+            for item in candidates:
+                liquidity = "n/d" if item.liquidity_usd is None else f"${item.liquidity_usd:,.0f}"
+                volume = "n/d" if item.volume_24h_usd is None else f"${item.volume_24h_usd:,.0f}"
+                price = "n/d" if item.price_usd is None else f"${item.price_usd:.8g}"
+                support = "soportada" if item.execution_supported else "sin adaptador de trading"
+                print(f"{item.chain:22} {item.token_symbol:12} {item.token_address} | "
+                      f"DEX={item.dex} pool={item.pair_address} liq={liquidity} vol24h={volume} "
+                      f"price={price} [{support}] fuentes={','.join(item.sources)}")
+                if item.coingecko_coin_id:
+                    print(f"  CoinGecko ID: {item.coingecko_coin_id}")
+                if item.pair_url:
+                    print(f"  {item.pair_url}")
+            for error in errors:
+                log.warning("Fuente de descubrimiento: %s", error)
+            if not candidates:
+                print("Sin pools coincidentes. Un símbolo no identifica un activo de forma única.")
+        return
+    if args.wizard is not None:
+        run_wizard(args.wizard)
+        return
     config = load_config()
     if args.live and not config.live_trading:
         raise RuntimeError("Para operar en real, configura LIVE_TRADING=true además de --live")
