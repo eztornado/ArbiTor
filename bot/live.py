@@ -6,10 +6,13 @@ from urllib.parse import urlparse
 
 import requests
 
-from .quotes import AERODROME_ROUTER, AERODROME_ROUTER_ABI
+from .quotes import (AERODROME_ROUTER, AERODROME_ROUTER_ABI, V2_ROUTER_ABI,
+                     THENA_ROUTER_ABI, CHAIN_IDS)
 
 
 ERC20_ABI = [
+    {"type": "function", "name": "decimals", "stateMutability": "view",
+     "inputs": [], "outputs": [{"type": "uint8"}]},
     {"type": "function", "name": "balanceOf", "stateMutability": "view",
      "inputs": [{"name": "owner", "type": "address"}], "outputs": [{"type": "uint256"}]},
     {"type": "function", "name": "allowance", "stateMutability": "view",
@@ -47,22 +50,29 @@ class LiveExecutor:
         if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
             raise ValueError("RPC_URL debe usar HTTPS salvo localhost")
         self.session = requests.Session()
-        if config.chain == "base":
+        if config.chain in {"base", "bsc"}:
             self._init_evm()
         else:
             self._init_solana()
 
     def _init_evm(self):
-        if not self.config.private_key or not self.config.zerox_api_key:
-            raise ValueError("Base live requiere EVM_PRIVATE_KEY y ZEROX_API_KEY")
+        if not self.config.private_key:
+            raise ValueError("Live EVM requiere EVM_PRIVATE_KEY")
         from web3 import Web3
         self.w3 = Web3(Web3.HTTPProvider(self.config.rpc_url, request_kwargs={"timeout": 20}))
-        if not self.w3.is_connected() or self.w3.eth.chain_id != 8453:
-            raise RuntimeError("RPC_URL no disponible o no corresponde a Base (chainId 8453)")
+        expected_chain_id = CHAIN_IDS[self.config.chain]
+        if not self.w3.is_connected() or self.w3.eth.chain_id != expected_chain_id:
+            raise RuntimeError(f"RPC_URL no disponible o no corresponde a {self.config.chain} (chainId {expected_chain_id})")
         self.account = self.w3.eth.account.from_key(self.config.private_key)
         self.wallet = self.account.address
-        self.aero = self.w3.eth.contract(
-            address=self.w3.to_checksum_address(AERODROME_ROUTER), abi=AERODROME_ROUTER_ABI)
+        if self.config.chain == "base":
+            self.aero = self.w3.eth.contract(
+                address=self.w3.to_checksum_address(AERODROME_ROUTER), abi=AERODROME_ROUTER_ABI)
+        self.pancake = self.w3.eth.contract(
+            address=self.w3.to_checksum_address(self.config.pancake_router_address), abi=V2_ROUTER_ABI)
+        if self.config.thena_router_address:
+            self.thena = self.w3.eth.contract(
+                address=self.w3.to_checksum_address(self.config.thena_router_address), abi=THENA_ROUTER_ABI)
 
     def _init_solana(self):
         if not self.config.solana_keypair_path or not self.config.jupiter_api_key:
@@ -87,7 +97,7 @@ class LiveExecutor:
         tx = token.functions.approve(spender, amount).build_transaction({
             "from": self.wallet,
             "nonce": self.w3.eth.get_transaction_count(self.wallet, "pending"),
-            "chainId": 8453,
+            "chainId": CHAIN_IDS[self.config.chain],
             "gas": 100_000,
             "gasPrice": self.w3.eth.gas_price,
         })
@@ -104,7 +114,7 @@ class LiveExecutor:
         base_gas = self.w3.eth.gas_price
         tx = {"from": self.wallet, "to": self.w3.to_checksum_address(to), "data": data,
               "value": int(value), "nonce": self.w3.eth.get_transaction_count(self.wallet, "pending"),
-              "chainId": 8453, "gasPrice": base_gas}
+              "chainId": CHAIN_IDS[self.config.chain], "gasPrice": base_gas}
         estimate = self.w3.eth.estimate_gas(tx)
         if gas_hint:
             estimate = max(estimate, int(gas_hint))
@@ -114,17 +124,17 @@ class LiveExecutor:
         tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt.status != 1:
-            raise RuntimeError(f"Swap Base revertido: {tx_hash.hex()}")
+            raise RuntimeError(f"Swap {self.config.chain} revertido: {tx_hash.hex()}")
         return tx_hash.hex()
 
     def _check_gas_price(self):
         limit = int(self.config.max_gas_price_gwei * 1_000_000_000)
         if self.w3.eth.gas_price > limit:
-            raise RuntimeError("Precio de gas de Base por encima de MAX_GAS_PRICE_GWEI")
+            raise RuntimeError(f"Precio de gas de {self.config.chain} por encima de MAX_GAS_PRICE_GWEI")
 
     def _swap_0x(self, sell, buy, amount):
         response = self.session.get("https://api.0x.org/swap/allowance-holder/quote", params={
-            "chainId": 8453, "sellToken": sell, "buyToken": buy,
+            "chainId": CHAIN_IDS[self.config.chain], "sellToken": sell, "buyToken": buy,
             "sellAmount": str(amount), "taker": self.wallet,
         }, headers={"0x-api-key": self.config.zerox_api_key, "0x-version": "v2"}, timeout=20)
         response.raise_for_status()
@@ -150,7 +160,7 @@ class LiveExecutor:
         if not self.config.odos_router_address:
             raise RuntimeError("Odos LIVE requiere ODOS_ROUTER_ADDRESS verificado para Base")
         quote_response = self.session.post("https://api.odos.xyz/sor/quote/v2", json={
-            "chainId": 8453, "inputTokens": [{"tokenAddress": sell, "amount": str(amount)}],
+            "chainId": CHAIN_IDS[self.config.chain], "inputTokens": [{"tokenAddress": sell, "amount": str(amount)}],
             "outputTokens": [{"tokenAddress": buy, "proportion": 1}],
             "slippageLimitPercent": self.config.slippage_bps / 100,
             "userAddr": self.wallet, "compact": True,
@@ -195,7 +205,49 @@ class LiveExecutor:
         built = fn.build_transaction({
             "from": self.wallet,
             "nonce": self.w3.eth.get_transaction_count(self.wallet, "pending"),
-            "chainId": 8453, "gas": 800_000, "gasPrice": self.w3.eth.gas_price,
+            "chainId": CHAIN_IDS[self.config.chain], "gas": 800_000, "gasPrice": self.w3.eth.gas_price,
+        })
+        return self._send_evm(built["to"], built["data"], 0, built["gas"])
+
+    def _swap_pancake(self, sell, buy, amount):
+        path = [self.w3.to_checksum_address(sell), self.w3.to_checksum_address(buy)]
+        quote = self.pancake.functions.getAmountsOut(amount, path).call()
+        min_out = int(quote[-1]) * (10_000 - self.config.slippage_bps) // 10_000
+        self._approve(sell, self.config.pancake_router_address, amount)
+        fn = self.pancake.functions.swapExactTokensForTokens(
+            amount, min_out, path, self.wallet, int(time.time()) + 60)
+        built = fn.build_transaction({
+            "from": self.wallet,
+            "nonce": self.w3.eth.get_transaction_count(self.wallet, "pending"),
+            "chainId": CHAIN_IDS[self.config.chain], "gas": 700_000,
+            "gasPrice": self.w3.eth.gas_price,
+        })
+        return self._send_evm(built["to"], built["data"], 0, built["gas"])
+
+    def _swap_thena(self, sell, buy, amount):
+        if not hasattr(self, "thena"):
+            raise RuntimeError("THENA_ROUTER_ADDRESS no está configurado")
+        best = None
+        for stable in (False, True):
+            route = [(self.w3.to_checksum_address(sell), self.w3.to_checksum_address(buy), stable)]
+            try:
+                out = int(self.thena.functions.getAmountsOut(amount, route).call()[-1])
+                if best is None or out > best[0]:
+                    best = (out, route)
+            except Exception:
+                continue
+        if not best:
+            raise RuntimeError("THENA Classic no tiene pool directo ejecutable")
+        out, routes = best
+        min_out = out * (10_000 - self.config.slippage_bps) // 10_000
+        self._approve(sell, self.config.thena_router_address, amount)
+        fn = self.thena.functions.swapExactTokensForTokens(
+            amount, min_out, routes, self.wallet, int(time.time()) + 60)
+        built = fn.build_transaction({
+            "from": self.wallet,
+            "nonce": self.w3.eth.get_transaction_count(self.wallet, "pending"),
+            "chainId": CHAIN_IDS[self.config.chain], "gas": 900_000,
+            "gasPrice": self.w3.eth.gas_price,
         })
         return self._send_evm(built["to"], built["data"], 0, built["gas"])
 
@@ -284,21 +336,25 @@ class LiveExecutor:
         return signature
 
     def balance(self, token):
-        if self.config.chain == "base":
+        if self.config.chain in {"base", "bsc"}:
             return int(self._evm_token(token).functions.balanceOf(self.wallet).call())
         return self._sol_balance(token)
 
     def swap(self, provider, sell, buy, amount):
         before = self.balance(buy)
-        if self.config.chain == "base":
+        if self.config.chain in {"base", "bsc"}:
             if provider == "0x":
                 signature = self._swap_0x(sell, buy, amount)
             elif provider == "Odos":
                 signature = self._swap_odos(sell, buy, amount)
             elif provider == "Aerodrome":
                 signature = self._swap_aerodrome(sell, buy, amount)
+            elif provider == "PancakeSwap V2":
+                signature = self._swap_pancake(sell, buy, amount)
+            elif provider == "THENA Classic":
+                signature = self._swap_thena(sell, buy, amount)
             else:
-                raise ValueError(f"Proveedor {provider} no compatible con Base")
+                raise ValueError(f"Proveedor {provider} no compatible con {self.config.chain}")
         else:
             if provider == "Raydium":
                 signature = self._swap_raydium(sell, buy, amount)
@@ -345,3 +401,75 @@ class LiveExecutor:
             return {"status": "reconciliation_required", "pnl": 0, "received": received,
                     "buy_signature": buy_signature,
                     "details": f"Compra confirmada {buy_signature}; estado de venta incierto, revisar wallet y transacciones: {exc}"}
+
+
+class MultiChainLiveExecutor:
+    """Uses pre-funded inventory on both chains; never bridges assets during a trade."""
+
+    def __init__(self, config):
+        self.config = config
+        self.executors = {chain: LiveExecutor(config.for_chain(chain)) for chain in config.chains}
+
+    def execute_opportunity(self, opportunity, quote_clients):
+        buy_chain = opportunity.buy_chain or self.config.chain
+        sell_chain = opportunity.sell_chain or buy_chain
+        if buy_chain not in self.executors or sell_chain not in self.executors:
+            return {"status": "inventory_blocked", "pnl": 0,
+                    "details": f"Ruta entre redes no configuradas: {buy_chain}->{sell_chain}"}
+        if buy_chain == sell_chain:
+            return self.executors[buy_chain].execute_opportunity(opportunity, quote_clients[buy_chain])
+        market_decimals = [quote_clients[chain].market_decimals for chain in (buy_chain, sell_chain)]
+        if any(value is None for value in market_decimals):
+            return {"status": "inventory_blocked", "pnl": 0,
+                    "details": "No se verificaron los decimales de los tokens en ambas redes"}
+        if market_decimals[0] != market_decimals[1]:
+            return {"status": "inventory_blocked", "pnl": 0,
+                    "details": "Decimales de quote u objetivo distintos; PnL multichain no comparable"}
+        source = self.executors[buy_chain]
+        destination = self.executors[sell_chain]
+        source_cfg, destination_cfg = source.config, destination.config
+        source_quote_before = source.balance(source_cfg.quote_token)
+        destination_quote_before = destination.balance(destination_cfg.quote_token)
+        destination_inventory = destination.balance(destination_cfg.target_token)
+        if source_quote_before < opportunity.amount_in:
+            return {"status": "inventory_blocked", "pnl": 0,
+                    "details": f"Saldo quote insuficiente en {buy_chain}; se requiere inventario prefinanciado"}
+        inventory_required = opportunity.target_amount * (10_000 + self.config.slippage_bps) // 10_000
+        if destination_inventory < inventory_required:
+            return {"status": "inventory_blocked", "pnl": 0,
+                    "details": f"Saldo del token objetivo insuficiente en {sell_chain} (incluido margen de slippage); el bot no puentea fondos"}
+        try:
+            buy_signature, received = source.swap(
+                opportunity.buy_provider, source_cfg.quote_token,
+                source_cfg.target_token, opportunity.amount_in)
+        except Exception as exc:
+            return {"status": "execution_state_unknown", "pnl": 0,
+                    "details": f"Compra {buy_chain} incierta; reconciliar ambas wallets: {exc}"}
+        try:
+            if destination.balance(destination_cfg.target_token) < received:
+                return {"status": "holding_after_buy", "pnl": 0, "received": received,
+                        "buy_signature": buy_signature,
+                        "details": f"Compra confirmada en {buy_chain}, inventario insuficiente para venta en {sell_chain}"}
+            fresh_sell = quote_clients[sell_chain].quote_from(
+                opportunity.sell_provider, destination_cfg.target_token,
+                destination_cfg.quote_token, received)
+            expected_net = fresh_sell.amount_out - opportunity.amount_in - self.config.estimated_cost_quote
+            if expected_net < self.config.min_profit_quote:
+                return {"status": "holding_after_buy", "pnl": 0, "received": received,
+                        "buy_signature": buy_signature,
+                        "details": f"Compra confirmada en {buy_chain}; edge de salida en {sell_chain} cayó a {expected_net}"}
+            sell_signature, sold_amount = destination.swap(
+                opportunity.sell_provider, destination_cfg.target_token,
+                destination_cfg.quote_token, received)
+            source_quote_after = source.balance(source_cfg.quote_token)
+            destination_quote_after = destination.balance(destination_cfg.quote_token)
+            pnl = (source_quote_after - source_quote_before) + (destination_quote_after - destination_quote_before)
+            pnl -= self.config.estimated_cost_quote
+            return {"status": "live_executed", "pnl": pnl, "received": received,
+                    "buy_signature": buy_signature, "sell_signature": sell_signature,
+                    "sold_amount": sold_amount,
+                    "details": f"buy={buy_chain}:{buy_signature} sell={sell_chain}:{sell_signature}; prefunded cross-chain inventory"}
+        except Exception as exc:
+            return {"status": "reconciliation_required", "pnl": 0, "received": received,
+                    "buy_signature": buy_signature,
+                    "details": f"Compra confirmada en {buy_chain}; venta en {sell_chain} incierta: {exc}"}

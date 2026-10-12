@@ -1,18 +1,20 @@
 # ArbiTor
 
-Escáner de oportunidades de arbitraje de precio entre agregadores y DEX en **Base** y **Solana**, escrito en Python. Consulta cotizaciones en paralelo, compara comprar en una fuente y vender en otra, descuenta una reserva de costes configurable y guarda el historial en SQLite.
+Escáner y ejecutor experimental de arbitraje entre DEX en **Base**, **BNB Chain** y **Solana**, escrito en Python. Consulta cotizaciones en paralelo, compara mercados de una red o entre cualquier combinación de esas tres redes, descuenta una reserva de costes configurable y guarda el historial en SQLite.
 
 > **Riesgo:** este software es experimental. No garantiza beneficios ni operaciones rentables. Los precios pueden cambiar entre la cotización y la ejecución; también influyen el deslizamiento, la liquidez, las comisiones, el MEV y los fallos de RPC o del proveedor. Empieza en modo paper y no uses fondos que no puedas permitirte perder.
 
 ## Qué hace
 
-En cada ciclo, solicita cotizaciones de compra y venta a los proveedores configurados y solo considera una oportunidad si las dos patas usan fuentes distintas. En Base compara 0x, Odos y Aerodrome. En Solana compara Raydium, Orca, Meteora, Pump.fun y Raydium LaunchLab (la ruta usada por Stonk.fun según la etiqueta actual de Jupiter). Las consultas se ejecutan concurrentemente, con el límite de `MAX_CONCURRENT_QUOTES`. Si live está activado, reevalúa continuamente el par configurado y puede repetir operaciones hasta `MAX_TRADES_PER_HOUR`, sujeto a oportunidad, métricas y pérdida diaria.
+En cada ciclo, solicita cotizaciones de compra y venta a los proveedores configurados. En Base compara 0x, Odos, Aerodrome y PancakeSwap V2; en BNB Chain compara 0x, Odos, PancakeSwap V2 y THENA Classic si se configura su router; en Solana compara Raydium, Orca, Meteora, Pump.fun y Raydium LaunchLab. Al indicar varias redes en `CHAINS`, compara todas las rutas entre ellas, incluidas Base↔Solana y BNB Chain↔Solana. Las consultas se ejecutan concurrentemente con el límite de `MAX_CONCURRENT_QUOTES`. Live puede repetir operaciones hasta `MAX_TRADES_PER_HOUR`, sujeto a inventario, edge, métricas y pérdida diaria.
 
-El proyecto incluye un ejecutor live experimental de dos swaps secuenciales, además del modo paper. Antes de comprar, exige umbral de edge, histórico suficiente y aprobación estadística; luego vuelve a cotizar la venta y solo la envía si el edge esperado aún supera el mínimo. La blockchain no ofrece atomicidad entre esas dos transacciones: puede ejecutarse la compra y no la venta, dejando tokens en la wallet. En ese caso, o si la confirmación queda incierta, el proceso se detiene para reconciliación manual. No hay beneficio seguro ni garantía de ejecución rentable.
+El proyecto incluye ejecución live experimental. Antes de comprar, exige umbral de edge, histórico suficiente y aprobación estadística; luego vuelve a cotizar la venta y solo la envía si el edge esperado aún supera el mínimo. En arbitraje multichain las dos redes no comparten una transacción atómica. El modo live presupone inventario prefinanciado en ambas cadenas: quote token en la cadena de compra y token objetivo en la cadena de venta. El bot no puentea fondos ni gestiona reequilibrio. Una pata puede quedar abierta y requerir reconciliación manual. No hay beneficio seguro ni garantía de ejecución rentable.
 
 ### Redes y proveedores
 
-- **Base:** cotizaciones de 0x, Odos y Aerodrome, comparadas en ambos sentidos. Aerodrome se consulta con `getAmountsOut` en su router y requiere `RPC_URL` de Base.
+- **Base:** cotizaciones de 0x, Odos, Aerodrome y PancakeSwap V2. Los adaptadores directos de Aerodrome y PancakeSwap V2 consultan pools directos; no incluyen todos los pools concentrados ni las rutas compuestas de sus smart routers.
+- **BNB Chain:** cotizaciones de 0x, Odos, PancakeSwap V2 y THENA Classic (cuando se configure `THENA_ROUTER_ADDRESS_BSC`). El adaptador de THENA cubre pools directos V2/classic estables y volátiles; no cotiza los pools concentrados THENA V3.
+- **Multichain Base ↔ BNB Chain ↔ Solana:** compara las representaciones configuradas manualmente del par entre cualquier subconjunto de esas redes. Las etiquetas de activo deben coincidir y los decimales se consultan en RPC (ERC-20 o mint Solana). Asume que los tokens quote etiquetados igual mantienen paridad; no usa un oráculo para medir depeg ni incluye costes/tiempos de puente porque no mueve fondos durante el arbitraje.
 - **Solana:** cotización directa mediante Raydium Trade API; Orca, Meteora, Pump.fun y LaunchLab se cotizan a través de Jupiter con filtros DEX para restringir cada ruta al protocolo correspondiente. `Stonk.fun` se mapea a la etiqueta `Raydium Launchlab`; no es una fuente de liquidez aparte de LaunchLab.
 - **Laya (opcional):** servicio externo que puede actuar como veto de riesgo. No genera ni autoriza operaciones por sí solo. Véase [Laya](https://github.com/NandhaKishorM/laya).
 
@@ -22,10 +24,10 @@ Consulta la documentación de [0x Swap API](https://docs.0x.org/), [Odos API](ht
 
 - Python 3.10 o posterior.
 - Acceso a Internet para las API de cotización.
-- API key de 0x. Odos usa su endpoint público de cotización, sujeto a disponibilidad y límites del servicio.
-- Para Base: URL RPC HTTPS de Base en `RPC_URL` para consultar Aerodrome (la plantilla usa el RPC público de Base, que puede limitar solicitudes).
+- API key de 0x para habilitar ese proveedor. Los adaptadores directos PancakeSwap V2, Aerodrome y THENA no necesitan esa clave. Odos usa su endpoint público de cotización, sujeto a disponibilidad y límites del servicio.
+- Para cada red seleccionada: RPC HTTPS. Se necesita para consultar cotizaciones directas, validar metadatos y firmar/enviar operaciones live.
 - API key de Jupiter, necesaria para cotizaciones filtradas por DEX en Solana.
-- Para live: RPC privado fiable, wallet financiada con el token quote y gas nativo (ETH en Base, SOL en Solana), y claves configuradas. Usa una wallet dedicada con fondos limitados.
+- Para live: RPC privado fiable, wallet financiada con el token quote y gas nativo (ETH en Base, BNB en BNB Chain, SOL en Solana), y claves configuradas. Usa una wallet dedicada con fondos limitados.
 
 ## Instalación
 
@@ -94,6 +96,36 @@ MAX_PRIORITY_FEE_LAMPORTS=1000000
 
 El archivo de keypair debe ser el JSON habitual de Solana (array de bytes). El RPC se valida contra Solana mainnet. Para live, compra y venta usan cuentas SPL existentes; configura el token quote y los fondos de SOL para comisiones. No se envuelve SOL automáticamente (`wrapSol=false`), por lo que el token nativo no sirve directamente como token quote.
 
+### Multichain Base, BNB Chain y Solana
+
+Selecciona dos o tres redes en `CHAINS`. Por ejemplo, para comparar todas: `CHAINS=base,bsc,solana`. PancakeSwap está desplegado en Base y BNB Chain. **THENA opera en BNB Chain/opBNB, no en Base ni Solana**, por lo que sus cotizaciones se consultan en BNB Chain. Configura las representaciones del par en cada red seleccionada y declara etiquetas iguales para los mismos activos:
+
+```dotenv
+CHAINS=base,bsc,solana
+QUOTE_TOKEN_BASE=<USDC-en-Base>
+TARGET_TOKEN_BASE=<token-en-Base>
+QUOTE_ASSET_BASE=USDC
+TARGET_ASSET_BASE=TOKEN
+RPC_URL_BASE=https://tu-rpc-base
+
+QUOTE_TOKEN_BSC=<USDC-en-BNB-Chain>
+TARGET_TOKEN_BSC=<token-en-BNB-Chain>
+QUOTE_ASSET_BSC=USDC
+TARGET_ASSET_BSC=TOKEN
+RPC_URL_BSC=https://tu-rpc-bsc
+PANCAKE_ROUTER_ADDRESS_BASE=0x8cFe327CEc66d1C090Dd72bd0FF11d690C33a2Eb
+PANCAKE_ROUTER_ADDRESS_BSC=0x10ED43C718714eb63d5aA57B78B54704E256024E
+THENA_ROUTER_ADDRESS_BSC=<router-THENA-Classic-verificado>
+
+QUOTE_TOKEN_SOLANA=<mint-USDC-Solana>
+TARGET_TOKEN_SOLANA=<mint-del-token-en-Solana>
+QUOTE_ASSET_SOLANA=USDC
+TARGET_ASSET_SOLANA=TOKEN
+RPC_URL_SOLANA=https://tu-rpc-solana-mainnet
+```
+
+En live, la clave EVM firma Base/BNB Chain y el keypair Solana firma las operaciones Solana; define `EVM_PRIVATE_KEY` y `SOLANA_KEYPAIR_PATH`. Financia previamente cada wallet con quote token y token objetivo suficiente para vender en esa red. Se necesita ETH en Base, BNB en BNB Chain y SOL en Solana para comisiones. Configura `ESTIMATED_COST_QUOTE` para cubrir conjuntamente ambas ejecuciones. La comparación de cotizaciones exige que quote y objetivo tengan los mismos decimales en todas las redes seleccionadas. Verifica que las direcciones/mints sean representaciones realmente equivalentes antes de asignarles etiquetas iguales. Las direcciones de router pueden cambiar; consulta [PancakeSwap Universal Router](https://developer.pancakeswap.finance/contracts/universal-router/addresses) y la [lista de contratos de THENA](https://docs.thena.fi/thena/official-links) antes de configurar. La comparación puede localizar un diferencial entre redes, pero el bot no traslada el inventario: el capital se va desplazando entre balances quote y token, y el reequilibrio sigue siendo manual.
+
 ### Umbrales y límites
 
 Valores relevantes de `.env`:
@@ -108,12 +140,17 @@ Valores relevantes de `.env`:
 | `MAX_CONCURRENT_QUOTES` | Máximo de solicitudes simultáneas de cotización. |
 | `MAX_TRADES_PER_HOUR` | Límite rodante de operaciones live completadas o parciales por hora. La plantilla usa 1.000; ajusta el límite a tu capital y proveedor. |
 | `DATABASE_PATH` | Ubicación de la base SQLite con el historial. |
-| `RPC_URL` | RPC HTTPS de Base usado para consultar el router de Aerodrome. |
+| `RPC_URL` | RPC de la cadena seleccionada en modo de una red. Para multichain, usa `RPC_URL_BASE`, `RPC_URL_BSC` y/o `RPC_URL_SOLANA`. |
+| `CHAINS` | Lista opcional de redes separadas por comas: `base`, `bsc` y `solana`. |
+| `PANCAKE_ROUTER_ADDRESS_BASE/BSC` | Routers PancakeSwap V2 por cadena; se pueden sobrescribir. |
+| `THENA_ROUTER_ADDRESS_BSC` | Router THENA Classic en BNB Chain. Debe verificarse en fuentes oficiales antes de habilitar. |
+| `QUOTE_TOKEN_*`, `TARGET_TOKEN_*` | Direcciones o mints de los tokens por red (`BASE`, `BSC` y `SOLANA`). |
+| `QUOTE_ASSET_*`, `TARGET_ASSET_*` | Etiquetas que declaran equivalencia económica entre representaciones multichain. |
 | `LIVE_TRADING` | Debe ser `true` junto con `--live` para habilitar el envío de transacciones. |
 | `EVM_PRIVATE_KEY` / `SOLANA_KEYPAIR_PATH` | Credencial de la wallet correspondiente a la red. |
 | `MAX_TRADE_AMOUNT` | Tope por operación en unidades mínimas del token quote; debe ser positivo en live. |
 | `MAX_DAILY_LOSS` | Límite de pérdida realizada diaria en unidades mínimas; positivo y obligatorio en live. |
-| `MAX_GAS_PRICE_GWEI` | Tope de precio de gas en Base. |
+| `MAX_GAS_PRICE_GWEI` | Tope de precio de gas para operaciones EVM, expresado en gwei. |
 | `MAX_PRIORITY_FEE_LAMPORTS` | Máximo de prioridad para swaps Jupiter en Solana. |
 | `ODOS_ROUTER_ADDRESS` | Dirección del router de Odos en Base que se valida antes de aprobar y enviar. |
 | `JUPITER_QUOTE_URL` | Endpoint Jupiter v1 usado con filtros para Orca, Meteora, Pump.fun y LaunchLab. |
@@ -153,7 +190,7 @@ python -m bot --live
 
 `--live` requiere además `LIVE_TRADING=true`. En modo live se aplica el veto Laya como fail-closed si `LAYA_ENABLED=true` y el servicio no responde. En una compra sin venta confirmada, en estado de transacción incierto o en cualquier excepción, el proceso se detiene. Inspecciona los hashes y balances antes de reiniciarlo. No ejecutes dos instancias con la misma wallet: el control de nonce y de exposición no es compartido entre procesos.
 
-La plantilla usa `INTERVAL_SECONDS=2`, `MAX_CONCURRENT_QUOTES=12` y `MAX_TRADES_PER_HOUR=1000` para detectar y repetir señales con frecuencia. Son límites máximos, no una promesa de velocidad: cada arbitraje requiere que haya un edge rentable y dos transacciones confirmadas. La ejecución live de una wallet es secuencial para conservar el orden de nonce y de balances; la simultaneidad se aplica a las cotizaciones, no a los swaps de esa cuenta.
+La plantilla usa `INTERVAL_SECONDS=2`, `MAX_CONCURRENT_QUOTES=12` y `MAX_TRADES_PER_HOUR=1000` para detectar y repetir señales con frecuencia. Son límites máximos, no una promesa de velocidad. La ejecución en cada wallet/red es secuencial para conservar nonce y balances. En rutas EVM↔EVM se usa la clave EVM en ambas redes; para rutas EVM↔Solana se usan la clave EVM y el keypair Solana. Las dos patas siguen sin atomicidad.
 
 El bot guarda el historial en `DATABASE_PATH` (por defecto, `data/trades.sqlite3`). Respaldar o borrar esa base cambia las métricas históricas disponibles.
 
@@ -162,7 +199,7 @@ El bot guarda el historial en `DATABASE_PATH` (por defecto, `data/trades.sqlite3
 El texto exacto depende de la red, el proveedor y las cotizaciones. En un ciclo paper, el programa informa de la oportunidad y de si pasa los filtros; una salida ilustrativa sería:
 
 ```text
-2026-10-12 10:00:00 INFO ARBITRAGE SCAN | mode=paper | venues=Raydium,Orca,Meteora,Pump.fun,Stonk.fun | chain=solana ...
+2026-10-12 10:00:00 INFO ARBITRAGE SCAN | mode=paper | venues=base:0x,Odos,Aerodrome,PancakeSwap V2 | chains=base | quote=USDC | target=WETH ...
 2026-10-12 10:00:01 INFO cycle=1 status=candidate buy=Orca sell=Raydium in=... mid=... out=... estimated_net_edge=...
 ```
 
@@ -178,9 +215,10 @@ Estas métricas sirven para seguimiento, no como inteligencia predictiva validad
 
 ## Límites actuales
 
-- El escáner trabaja con el par configurado, una oportunidad por ciclo. Puede repetir ciclos continuamente y alcanzar hasta `MAX_TRADES_PER_HOUR`, pero no procesa varios tokens a la vez.
+- El escáner trabaja con un par lógico y sus direcciones por red, una oportunidad por ciclo. Puede repetir ciclos continuamente, pero no descubre tokens automáticamente ni procesa varios activos en paralelo.
 - Las operaciones live de una wallet son secuenciales. `MAX_CONCURRENT_QUOTES` paraleliza consultas, no swaps. Esta serialización evita carreras de nonce y balance; no es ejecución concurrente de órdenes.
 - Las dos patas no son atómicas. El sistema se detiene ante una pata fallida o estado incierto, pero la recuperación de inventario y la reconciliación de transacciones son manuales.
+- El modo multichain compara cualquier combinación de Base, BNB Chain y Solana, y requiere inventario preposicionado; no hace bridging automático. Cada operación mueve exposición del token quote y del objetivo entre balances de distintas redes, por lo que el inventario se agota o desplaza y debe reequilibrarse manualmente.
 - Los límites de pérdida/trades dependen de SQLite local y del reloj local; no coordinan otras instancias. Ejecuta una sola instancia por wallet y revisa la base antes de reanudar.
 - El PnL realizado tiene límites: usa delta del balance quote y resta una reserva fija; algunas comisiones nativas y valoración de inventario pueden no reflejarse exactamente.
 - Los agregadores pueden consultar liquidez coincidente; la diferencia puede ser solo latencia o datos desactualizados. Aerodrome solo cubre pools directos del factory por defecto, no rutas con tokens intermedios ni otros factories.

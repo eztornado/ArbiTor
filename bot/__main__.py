@@ -4,12 +4,12 @@ import signal
 import time
 
 from .config import load_config
-from .arbitrage import find_best_opportunity
+from .arbitrage import find_best_opportunity, find_best_multichain_opportunity
 from .laya import LayaRiskVeto
 from .metrics import calculate
 from .quotes import QuoteClient
 from .store import Store
-from .live import LiveExecutor
+from .live import LiveExecutor, MultiChainLiveExecutor
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -24,7 +24,7 @@ def stop(*_args):
 
 def main():
     global stopping
-    parser = argparse.ArgumentParser(description="Escáner de arbitraje cross-venue para Base/Solana")
+    parser = argparse.ArgumentParser(description="Escáner de arbitraje cross-venue y multichain para Base/BNB/Solana")
     parser.add_argument("--once", action="store_true", help="ejecuta un ciclo y termina")
     parser.add_argument("--live", action="store_true", help="ejecuta swaps reales (requiere LIVE_TRADING=true)")
     parser.add_argument("--metrics", action="store_true", help="muestra estadísticas históricas del par y termina")
@@ -34,22 +34,28 @@ def main():
     config = load_config()
     if args.live and not config.live_trading:
         raise RuntimeError("Para operar en real, configura LIVE_TRADING=true además de --live")
-    live = LiveExecutor(config) if args.live else None
-    client, store = QuoteClient(config), Store(config.database_path)
+    market_configs = {chain: config.for_chain(chain) for chain in config.chains}
+    clients = {chain: QuoteClient(market) for chain, market in market_configs.items()}
+    client = clients[config.chain]
+    live = (MultiChainLiveExecutor(config) if len(config.chains) > 1 else LiveExecutor(config)) if args.live else None
+    store = Store(config.database_path)
+    scope_chain = "+".join(config.chains) if len(config.chains) > 1 else config.chain
+    metrics_quote = config.quote_asset if len(config.chains) > 1 else config.quote_token
+    metrics_target = config.target_asset if len(config.chains) > 1 else config.target_token
     if args.metrics:
-        history = store.recent_quote_pnls(config.chain, config.quote_token, config.target_token,
+        history = store.recent_quote_pnls(scope_chain, metrics_quote, metrics_target,
                                            config.metrics_window)
         metrics = calculate(history, min_samples=config.metrics_min_samples,
                             min_win_probability=config.min_win_probability,
                             min_pnl=config.min_profit_quote)
-        print(f"pair={config.chain}:{config.quote_token}->{config.target_token}")
+        print(f"pair={scope_chain}:{metrics_quote}->{metrics_target}")
         print(f"quote_samples={metrics.samples} estimated_quote_win_probability={metrics.estimated_win_probability:.3f} "
               f"90pct_lower_bound={metrics.win_probability_lower_bound:.3f} "
               f"estimated_below_threshold_probability={metrics.estimated_below_threshold_probability:.3f}")
         print(f"mean_quote_pnl={metrics.mean_pnl:.2f} pnl_stddev={metrics.pnl_stddev:.2f} "
               f"conservative_pnl={metrics.conservative_pnl:.2f} risk_gate_ready={metrics.ready} "
               f"risk_gate_approved={metrics.approved}")
-        realized = store.realized_live_pnls(config.chain, config.quote_token, config.target_token)
+        realized = store.realized_live_pnls(scope_chain, metrics_quote, metrics_target)
         live_net = sum(realized)
         live_win_rate = (sum(value > 0 for value in realized) / len(realized)) if realized else 0.0
         equity, peak, max_drawdown = 0, 0, 0
@@ -72,24 +78,31 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     stopping = False
-    log.info("ARBITRAGE SCAN | mode=%s | venues=%s | chain=%s | quote=%s | target=%s | amount=%d",
-             "live" if live else "paper", ",".join(client.providers()),
-             config.chain, config.quote_token, config.target_token, config.amount_in)
+    venue_summary = " | ".join(f"{chain}:{','.join(c.providers())}" for chain, c in clients.items())
+    log.info("ARBITRAGE SCAN | mode=%s | venues=%s | chains=%s | quote=%s | target=%s | amount=%d",
+             "live" if live else "paper", venue_summary,
+             scope_chain, metrics_quote, metrics_target, config.amount_in)
     try:
         while not stopping:
             started = time.monotonic()
             try:
-                opportunity, quote_errors = find_best_opportunity(
-                    client, config.quote_token, config.target_token,
-                    config.amount_in, config.estimated_cost_quote,
-                )
+                if len(clients) > 1:
+                    opportunity, quote_errors = find_best_multichain_opportunity(
+                        clients,
+                        {chain: market.quote_token for chain, market in market_configs.items()},
+                        {chain: market.target_token for chain, market in market_configs.items()},
+                        config.amount_in, config.estimated_cost_quote)
+                else:
+                    opportunity, quote_errors = find_best_opportunity(
+                        client, config.quote_token, config.target_token,
+                        config.amount_in, config.estimated_cost_quote)
                 if opportunity is None:
-                    store.record((config.chain, "none", config.amount_in, 0, 0,
+                    store.record((scope_chain, "none", config.amount_in, 0, 0,
                                   config.estimated_cost_quote, 0, config.min_profit_quote,
                                   "no_cross_venue_route"), mode="live" if live else "paper", quote_pnl=0,
-                                 quote_token=config.quote_token, target_token=config.target_token)
-                    log.warning("Sin oportunidad cross-venue; venues=%s errores=%s",
-                                ",".join(client.providers()), quote_errors)
+                                 quote_token=metrics_quote, target_token=metrics_target)
+                    log.warning("Sin oportunidad cross-venue/multichain; venues=%s errores=%s",
+                                venue_summary, quote_errors)
                     if args.once:
                         break
                     time.sleep(max(0.0, config.interval_seconds - (time.monotonic() - started)))
@@ -100,7 +113,7 @@ def main():
                                                 "amount_out": opportunity.amount_out})()
                 quote_pnl = opportunity.net_edge
                 metrics = calculate(
-                    store.recent_quote_pnls(config.chain, config.quote_token, config.target_token,
+                    store.recent_quote_pnls(scope_chain, metrics_quote, metrics_target,
                                             config.metrics_window),
                     min_samples=config.metrics_min_samples,
                     min_win_probability=config.min_win_probability,
@@ -113,8 +126,9 @@ def main():
                 laya_failed = False
                 if laya and candidate and metrics.ready:
                     snapshot = {
-                        "chain": config.chain, "quote_token": config.quote_token,
-                        "target_token": config.target_token, "amount_in": config.amount_in,
+                        "chain": f"{opportunity.buy_chain}->{opportunity.sell_chain}",
+                        "quote_token": metrics_quote, "target_token": metrics_target,
+                        "amount_in": config.amount_in,
                         "buy_out": buy.amount_out, "round_trip_out": sell.amount_out,
                         "buy_provider": opportunity.buy_provider,
                         "sell_provider": opportunity.sell_provider,
@@ -146,16 +160,17 @@ def main():
                     elif laya and laya_failed:
                         status = "laya_unavailable"
                     else:
-                        result = live.execute_opportunity(opportunity, client)
+                        result = (live.execute_opportunity(opportunity, clients) if len(clients) > 1
+                                  else live.execute_opportunity(opportunity, client))
                         pnl, status = result["pnl"], result["status"]
                         log.info("Ejecución live: %s | pnl=%d | %s",
                                  status, pnl, result["details"])
                 cycle_id, total_pnl = store.record((
-                    config.chain, f"{buy.provider}->{sell.provider}", config.amount_in, buy.amount_out,
+                    scope_chain, f"{opportunity.buy_chain}:{buy.provider}->{opportunity.sell_chain}:{sell.provider}", config.amount_in, buy.amount_out,
                     sell.amount_out, config.estimated_cost_quote, pnl,
                     config.min_profit_quote, status,
                 ), mode="live" if live else "paper", quote_pnl=quote_pnl,
-                   quote_token=config.quote_token, target_token=config.target_token)
+                   quote_token=metrics_quote, target_token=metrics_target)
 
                 log.info("cycle=%d mode=%s status=%s buy=%s sell=%s in=%d mid=%d out=%d edge_or_realized_pnl=%d cumulative_pnl=%d quote_units",
                          cycle_id, "live" if live else "paper", status,
